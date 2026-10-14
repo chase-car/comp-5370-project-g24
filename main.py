@@ -1,172 +1,101 @@
-#!/usr/bin/env python3
 """
-Simple terminal-based peer-to-peer messaging.
-
-Every instance is both a server (listens for incoming peers) and a client
-(can connect to other peers). Messages are newline-delimited JSON over TCP.
+main.py
+-------
+Command-line entry point.
 
 Usage:
-    Terminal 1:  python p2p_chat.py --name Alice --port 5000
-    Terminal 2:  python p2p_chat.py --name Bob   --port 5001 --connect 127.0.0.1:5000
+    # Peer A (listens for a connection):
+    python main.py --listen 5000 --name alice --keyfile alice_identity.pem
 
-Commands (inside the chat):
-    /connect <host> <port>   connect to another peer
-    /peers                   list connected peers
-    /quit                    exit
-Anything else is sent as a message to all connected peers.
+    # Peer B (connects to peer A):
+    python main.py --connect 127.0.0.1:5000 --name bob --keyfile bob_identity.pem
+
+Both sides can type and will see incoming messages interleaved.
+Type /quit to exit.
 """
 
 import argparse
-import json
-import socket
+import sys
 import threading
 
+from network import Connection
+from protocol import perform_handshake, HandshakeFailed, SecureChannel
+from keystore import load_identity, TrustStore
 
-class Peer:
-    def __init__(self, name: str, host: str, port: int):
-        self.name = name
-        self.host = host
-        self.port = port
-        self.peers = {}                 # socket -> peer name
-        self.lock = threading.Lock()    # protects self.peers
-        self.running = True
-        self.server = None
+TRUST_STORE_FILE = "trusted_keys.json"
 
-    # ---------- output ----------
-    def show(self, text: str) -> None:
-        """Print a line without mangling the input prompt."""
-        print(f"\r{text}\n{self.name}> ", end="", flush=True)
 
-    # ---------- networking ----------
-    def start_server(self) -> None:
-        self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.server.bind((self.host, self.port))
-        self.server.listen()
-        threading.Thread(target=self._accept_loop, daemon=True).start()
-
-    def _accept_loop(self) -> None:
-        while self.running:
-            try:
-                conn, addr = self.server.accept()
-            except OSError:
-                break
-            threading.Thread(target=self._handle, args=(conn, addr), daemon=True).start()
-
-    def connect(self, host: str, port: int) -> None:
+def reader_thread(channel: SecureChannel, stop_event: threading.Event):
+    """Continuously receive and print messages until the peer disconnects."""
+    while not stop_event.is_set():
         try:
-            conn = socket.create_connection((host, port), timeout=5)
-            conn.settimeout(None)
-        except OSError as e:
-            self.show(f"* Could not connect to {host}:{port} ({e})")
-            return
-        threading.Thread(target=self._handle, args=(conn, (host, port)), daemon=True).start()
+            plaintext = channel.recv_message()
+        except ValueError as e:
+            # Authentication / replay failure -- do NOT crash, just warn
+            print(f"\n[!] Dropped a message: {e}")
+            continue
+        except (ConnectionError, OSError):
+            print("\n[network] Connection closed by peer.")
+            stop_event.set()
+            break
+        print(f"\rpeer> {plaintext}\nyou> ", end="", flush=True)
 
-    @staticmethod
-    def _send(sock: socket.socket, obj: dict) -> None:
-        sock.sendall((json.dumps(obj) + "\n").encode("utf-8"))
 
-    def _handle(self, conn: socket.socket, addr) -> None:
-        """Run for each connection: handshake, then read messages until closed."""
-        peer_name = None
+def writer_loop(channel: SecureChannel, stop_event: threading.Event):
+    """Read from stdin and send encrypted messages until /quit."""
+    while not stop_event.is_set():
         try:
-            self._send(conn, {"type": "hello", "name": self.name})
-            for line in conn.makefile("r", encoding="utf-8"):
-                try:
-                    msg = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-
-                if msg.get("type") == "hello":
-                    peer_name = str(msg.get("name", f"{addr[0]}:{addr[1]}"))
-                    with self.lock:
-                        self.peers[conn] = peer_name
-                    self.show(f"* {peer_name} connected")
-                elif msg.get("type") == "msg":
-                    self.show(f"[{msg.get('name', '?')}] {msg.get('text', '')}")
-        except OSError:
-            pass
-        finally:
-            with self.lock:
-                self.peers.pop(conn, None)
-            try:
-                conn.close()
-            except OSError:
-                pass
-            if peer_name and self.running:
-                self.show(f"* {peer_name} disconnected")
-
-    def broadcast(self, text: str) -> None:
-        with self.lock:
-            sockets = list(self.peers)
-        if not sockets:
-            self.show("* No peers connected. Use /connect <host> <port>")
-            return
-        for s in sockets:
-            try:
-                self._send(s, {"type": "msg", "name": self.name, "text": text})
-            except OSError:
-                pass  # the handler thread will clean up the dead connection
-
-    def shutdown(self) -> None:
-        self.running = False
-        with self.lock:
-            sockets = list(self.peers)
-        for s in sockets:
-            try:
-                s.close()
-            except OSError:
-                pass
-        if self.server:
-            self.server.close()
-
-    # ---------- UI loop ----------
-    def run(self) -> None:
-        print(f"Listening on {self.host}:{self.port} as '{self.name}'. Type /quit to exit.")
-        while True:
-            try:
-                line = input(f"{self.name}> ").strip()
-            except (EOFError, KeyboardInterrupt):
-                print()
-                break
-            if not line:
-                continue
-
-            if line.startswith("/"):
-                parts = line.split()
-                cmd = parts[0].lower()
-                if cmd == "/quit":
-                    break
-                elif cmd == "/peers":
-                    with self.lock:
-                        names = list(self.peers.values())
-                    self.show("* Peers: " + (", ".join(names) if names else "(none)"))
-                elif cmd == "/connect" and len(parts) == 3 and parts[2].isdigit():
-                    self.connect(parts[1], int(parts[2]))
-                else:
-                    self.show("* Unknown command. Try /connect <host> <port>, /peers, /quit")
-            else:
-                self.broadcast(line)
-
-        self.shutdown()
+            line = input("you> ")
+        except (EOFError, KeyboardInterrupt):
+            break
+        if line.strip() == "/quit":
+            break
+        if line == "":
+            continue
+        try:
+            channel.send_message(line)
+        except (ConnectionError, OSError):
+            print("[network] Could not send -- connection closed.")
+            break
+    stop_event.set()
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Simple terminal P2P chat")
-    parser.add_argument("--name", required=True, help="your display name")
-    parser.add_argument("--host", default="0.0.0.0", help="interface to listen on")
-    parser.add_argument("--port", type=int, required=True, help="port to listen on")
-    parser.add_argument("--connect", metavar="HOST:PORT", help="peer to connect to at startup")
+def main():
+    parser = argparse.ArgumentParser(description="Secure P2P terminal chat")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--listen", type=int, metavar="PORT",
+                       help="Listen for an incoming connection on this port")
+    mode.add_argument("--connect", type=str, metavar="HOST:PORT",
+                       help="Connect out to a peer at host:port")
+    parser.add_argument("--name", required=True, help="Your display name")
+    parser.add_argument("--keyfile", required=True,
+                         help="Path to your long-term identity key (created if missing)")
     args = parser.parse_args()
 
-    peer = Peer(args.name, args.host, args.port)
-    peer.start_server()
+    identity_private_key = load_identity(args.keyfile)
+    trust_store = TrustStore(TRUST_STORE_FILE)
 
-    if args.connect:
-        host, _, port = args.connect.rpartition(":")
-        peer.connect(host or "127.0.0.1", int(port))
+    if args.listen is not None:
+        conn = Connection.listen_and_accept("0.0.0.0", args.listen)
+    else:
+        host, port_str = args.connect.split(":")
+        conn = Connection.connect_to(host, int(port_str))
 
-    peer.run()
+    try:
+        channel = perform_handshake(conn, identity_private_key, args.name, trust_store)
+    except HandshakeFailed as e:
+        print(f"[!] Handshake failed: {e}")
+        conn.close()
+        sys.exit(1)
+
+    stop_event = threading.Event()
+    t = threading.Thread(target=reader_thread, args=(channel, stop_event), daemon=True)
+    t.start()
+
+    print("Connected and secured. Type /quit to exit.\n")
+    writer_loop(channel, stop_event)
+    conn.close()
+    print("Disconnected.")
 
 
 if __name__ == "__main__":
