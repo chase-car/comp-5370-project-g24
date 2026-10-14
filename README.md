@@ -207,7 +207,7 @@ secure_chat/
    number as associated data, so a copied/replayed/reordered message is
    rejected by the recipient.
 
-## Known limitations / good discussion points for your report
+## Known limitations
 
 - No forward secrecy beyond one session (no ratcheting) — a stretch goal.
 - Identity private keys are stored unencrypted on disk; a stretch goal is
