@@ -5,12 +5,11 @@ Handles long-term Ed25519 identity keys: generating them, saving/loading
 them from disk, and a simple "trusted keys" file that implements a
 Signal/SSH-style trust-on-first-use (TOFU) model.
 
-Trust model used here (document this choice in your report):
+Trust model used here:
   - The FIRST time you talk to a peer, you must verify their fingerprint
     out-of-band (read it to them over the phone, compare in person, etc).
   - After that, their fingerprint is pinned in trusted_keys.json.
-  - If it ever changes, the program warns you loudly -- that's exactly
-    the signal a MITM attack would produce.
+  - If it ever changes, the program warns you
 """
 
 import json

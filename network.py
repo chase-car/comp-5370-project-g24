@@ -2,7 +2,7 @@
 network.py
 ----------
 Plain TCP transport with length-prefixed framing. This layer knows
-NOTHING about encryption -- it just moves bytes reliably and splits the
+nothing about encryption, it just moves bytes reliably and splits the
 stream back into discrete messages. Keeping it separate from crypto.py
 makes both easier to test and reason about.
 

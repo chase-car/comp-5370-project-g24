@@ -67,8 +67,7 @@ class SecureChannel:
         ciphertext = bytes.fromhex(frame["ciphertext"])
 
         # Replay / reorder protection: reject anything not strictly
-        # increasing. A production system might allow a small reorder
-        # window; here we keep it strict and simple for demonstration.
+        # increasing.
         if seq < self.recv_seq:
             raise ValueError(f"Rejected: sequence {seq} already seen "
                               f"(replay or duplicate)")
@@ -85,21 +84,6 @@ class SecureChannel:
 
 def perform_handshake(conn: Connection, identity_private_key, my_name: str,
                        trust_store, interactive: bool = True) -> SecureChannel:
-    """
-    Runs an authenticated Diffie-Hellman handshake over `conn`.
-
-    Steps (both sides do the same thing simultaneously):
-      1. Generate an ephemeral X25519 keypair for THIS session.
-      2. Sign (ephemeral_pub || my_name) with our long-term Ed25519 key.
-      3. Send: identity_pub, ephemeral_pub, signature, name.
-      4. Receive the peer's equivalent message.
-      5. Verify their signature over THEIR ephemeral key -- this is what
-         stops a MITM from swapping in their own ephemeral key.
-      6. Check/pin their identity key fingerprint via the trust store.
-      7. Derive session key with ECDH + HKDF, salted with both ephemeral
-         public keys so both sides agree on the exact same salt.
-      8. Split into two directional keys so send/recv never share a key.
-    """
     identity_public_key = identity_private_key.public_key()
     identity_pub_bytes = crypto.public_key_to_bytes(identity_public_key)
 
@@ -123,8 +107,8 @@ def perform_handshake(conn: Connection, identity_private_key, my_name: str,
     peer_eph_pub_bytes = bytes.fromhex(incoming["ephemeral_pub"])
     peer_signature = bytes.fromhex(incoming["signature"])
 
-    # --- Authentication check: did the peer actually hold the private
-    #     key matching their claimed identity, and sign THIS ephemeral key?
+    # Authentication check: did the peer actually hold the private
+    # key matching their claimed identity, and sign this ephemeral key?
     peer_identity_pub = crypto.ed25519_public_key_from_bytes(peer_identity_pub_bytes)
     signed_payload = peer_eph_pub_bytes + peer_name.encode()
     if not crypto.verify(peer_identity_pub, peer_signature, signed_payload):
@@ -133,10 +117,7 @@ def perform_handshake(conn: Connection, identity_private_key, my_name: str,
             "signed by the claimed identity. Possible MITM attack."
         )
 
-    # --- Trust check: have we seen this identity key for this name before?
-    # `interactive=False` (used by multi-peer broadcast chat) avoids calling
-    # input() from this thread, since this handshake can run concurrently
-    # with a main thread that's also blocked reading stdin for chat input.
+    # Trust check
     if interactive:
         trusted = trust_store.check_or_prompt(peer_name, peer_identity_pub_bytes)
     else:
@@ -149,14 +130,9 @@ def perform_handshake(conn: Connection, identity_private_key, my_name: str,
 
     # --- Derive the shared session key (confidentiality) ---
     peer_eph_pub = crypto.x25519_public_key_from_bytes(peer_eph_pub_bytes)
-    # Sort the two ephemeral keys so both sides compute an IDENTICAL salt
-    # regardless of who is the "listener" vs "connector".
     salt = b"".join(sorted([eph_pub_bytes, peer_eph_pub_bytes]))
     session_key = crypto.derive_session_keys(eph_private, peer_eph_pub, salt)
 
-    # --- Split into independent directional keys ---
-    # Using HKDF again with a fixed info string per direction means a
-    # compromise of one direction's key doesn't reveal the other's.
     key_a2b = crypto.derive_session_keys(eph_private, peer_eph_pub, salt, info=b"a-to-b")
     key_b2a = crypto.derive_session_keys(eph_private, peer_eph_pub, salt, info=b"b-to-a")
 
