@@ -14,8 +14,6 @@ integrity, and authentication.
 | Authentication | Ed25519 signatures over each session's ephemeral key, tied to a trust-on-first-use (TOFU) fingerprint store |
 | Replay / reorder protection | Strictly increasing sequence numbers, included in GCM's associated data |
 
-This is a **learning project, not production software**. See "Known
-limitations" below.
 
 ## Setup
 
@@ -50,7 +48,7 @@ python main.py --connect 127.0.0.1:5000 --name bob --keyfile bob_identity.pem
 
 ### `p2p_chat_secure.py` (three or more peers)
 
-Every instance listens AND can connect out, so any instance can be "first":
+Every instance listens and can connect out, so any instance can be "first":
 
 ```bash
 # Terminal 1
@@ -69,16 +67,14 @@ other's key **fingerprint**. In real use you'd verify this out-of-band
 (read it aloud on a phone call, compare in person) before trusting it —
 this is exactly what stops a man-in-the-middle attack. `main.py` asks
 interactively (`y`/`N`); `p2p_chat_secure.py` trusts automatically on
-first contact (since it can't safely prompt from a background thread —
-see the code comments in `keystore.py` for why) but still prints the
-fingerprint for you to check, and still refuses automatically if a
-fingerprint ever changes later.
+first contact but still prints the fingerprint for you to check, 
+and still refuses automatically if a fingerprint ever changes later.
 
 Type messages and press enter. Type `/quit` to disconnect.
 
 ## Testing
 
-### 1. Automated unit tests (run this first, every time you change code)
+### 1. Automated unit tests
 
 ```bash
 pytest tests/ -v
@@ -96,7 +92,7 @@ Covers:
 If any of these fail after an edit, fix that before testing manually —
 the manual tests below assume the primitives already work.
 
-### 2. Manual local test (same machine, two terminals)
+### 2. Manual local test
 
 Run the two `main.py` commands above in two terminal windows side by
 side. Confirm:
@@ -109,69 +105,6 @@ Repeat with `p2p_chat_secure.py` and three terminals, additionally checking:
 - [ ] `/peers` in each terminal lists the other two names
 - [ ] A message typed in any terminal appears in BOTH others
 
-### 3. Testing across two real machines (same LAN, e.g. same wifi)
-
-Same as above, but use the listener's real LAN IP instead of `127.0.0.1`
-(find it with `ipconfig` on Windows or `ifconfig`/`ip a` on Mac/Linux).
-Confirm the same checklist as above. This catches issues `127.0.0.1`
-testing can hide, like firewall prompts on first run.
-
-### 4. Testing across two machines on DIFFERENT networks (the internet)
-
-This is where NAT becomes a problem — see the port-forwarding or
-`relay.py` setup covered earlier in this chat / your notes. Once either
-is set up, repeat the same checklist as step 2, using the forwarded
-public IP (port forwarding) or the relay's public IP (relay.py) in
-place of a LAN address. If using `relay.py`, BOTH sides use `--connect`
-pointed at the relay — neither uses `--listen`, since the relay does
-the listening.
-
-### 5. Manually triggering each attack (for your demo, not just pytest)
-
-These let you show the failure happening live, not just point at a
-green test.
-
-**Tampering:** start a normal chat, then in a third terminal run a
-small script that connects as a MITM proxy between the two (or, more
-simply, temporarily add a line in `network.py`'s `send_frame` that
-flips one byte before sending). You should see the receiver print
-`[!] Dropped a message: ... authentication failed` instead of crashing
-or showing garbage text. (The automated version of this same idea is
-`tests/test_crypto.py::test_tampered_ciphertext_is_rejected`.)
-
-**Forged signature / MITM impersonation:** write a tiny script that
-generates its OWN Ed25519 keypair, then tries to complete a handshake
-claiming to be "alice" without alice's real private key. The real
-peer's `perform_handshake` should raise `HandshakeFailed` with the
-"Signature verification FAILED" message. (Automated version:
-`tests/test_crypto.py::test_signature_rejects_wrong_signer`.)
-
-**Replay:** capture one JSON frame your program sends (e.g. print it in
-`send_frame` temporarily, or use Wireshark), then write a short script
-that opens a raw socket to the listening peer and resends those exact
-bytes after a real conversation has moved on. The receiver should
-reject it with `sequence ... already seen`. (Automated version:
-`tests/test_protocol.py::test_replayed_message_is_rejected`.)
-
-**Fingerprint change / trust violation:** run a normal handshake once
-so a name is pinned in `trusted_keys.json`. Then delete and regenerate
-that peer's `--keyfile` (so it's a new identity) and reconnect using
-the SAME name. You should see the "WARNING: key DOES NOT MATCH" message
-and the handshake should be refused.
-
-**Eavesdropping:** run Wireshark or `tcpdump -i lo -A` (loopback) while
-chatting. Confirm you only see JSON with hex-encoded ciphertext (no
-readable message text) in the capture — contrast this with capturing
-`p2p_chat.py` (the original, unencrypted version) side by side to show
-the actual before/after.
-
-### 6. Pre-demo checklist
-
-Run through this the day before you present, not the morning of:
-- [ ] Clean install works: delete `venv/`, redo `Setup` steps from scratch
-- [ ] All pytest tests pass
-- [ ] Two-machine test over your actual demo network/relay succeeds
-- [ ] At least one attack demo (recommend: tampering, it's the most visual) is scripted and rehearsed, not improvised live
 
 ## Project structure
 
@@ -206,15 +139,3 @@ secure_chat/
 6. Every message after this point is AES-GCM encrypted, with its sequence
    number as associated data, so a copied/replayed/reordered message is
    rejected by the recipient.
-
-## Known limitations
-
-- No forward secrecy beyond one session (no ratcheting) — a stretch goal.
-- Identity private keys are stored unencrypted on disk; a stretch goal is
-  to encrypt them with a password (PBKDF2/scrypt) via `getpass`.
-- Trust-on-first-use requires the user to actually verify fingerprints
-  out-of-band the first time; if they just click "yes," a MITM present
-  from the very first connection would succeed. This is a real, honestly
-  documented limitation of TOFU (same one SSH and Signal have).
-- No protection against a compromised endpoint, traffic analysis/metadata,
-  or denial-of-service — out of scope per the threat model.
